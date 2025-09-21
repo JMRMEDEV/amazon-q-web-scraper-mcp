@@ -1,6 +1,13 @@
 # Enhanced Web Scraper MCP Server
 
-An enhanced Model Context Protocol (MCP) server for web scraping, React app testing, and React Native web app inspection using Playwright. **Fully backward compatible** with regular websites and standard React applications.
+A professional Model Context Protocol (MCP) server for web scraping, React app testing, and React Native web app inspection using Playwright. **Fully backward compatible** with regular websites and standard React applications.
+
+## 🚀 Recent Improvements
+
+- **Enhanced Error Handling** - Comprehensive input validation and error reporting
+- **Optimized Performance** - Reduced code duplication and improved efficiency  
+- **Standardized Timeouts** - Configurable timeout constants for reliability
+- **Professional Code Structure** - ES6+ best practices and maintainable architecture
 
 ## 🔄 Backward Compatibility
 
@@ -195,22 +202,12 @@ q chat "Test the login flow on my React app at localhost:3000"
 q chat "Inspect the React Native web app at localhost:8081"
 ```
 
-## Migration Guide
-
-**No migration needed!** Your existing workflows continue to work:
-
-- ✅ All existing `scrape_page` calls work unchanged
-- ✅ All existing `test_react_app` calls work unchanged  
-- ✅ All existing CSS selectors work unchanged
-- ✅ All existing parameters work unchanged
-
-**New optional features:**
-- Add `mobileViewport: true` for mobile rendering
-- Add `device: "iPhone 12"` for device emulation
-- Add `waitForHydration: true` for React apps
-- Use testID selectors for React Native web elements
-
 ## Troubleshooting
+
+### Error Handling
+- **Input Validation** - Server validates required parameters and provides clear error messages
+- **Timeout Configuration** - Default timeouts are optimized but can be adjusted per request
+- **Browser Cleanup** - Automatic resource cleanup prevents memory leaks
 
 ### Regular Websites
 - Use standard CSS selectors (`.class`, `#id`, `tag[attribute]`)
