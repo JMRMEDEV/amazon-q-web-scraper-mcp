@@ -470,6 +470,37 @@ class WebScraperServer {
             },
             required: ['url', 'selector']
           }
+        },
+        {
+          name: 'extract_content',
+          description: 'Extract clean, readable content from web pages with semantic structure and hyperlinks',
+          inputSchema: {
+            type: 'object',
+            properties: {
+              url: {
+                type: 'string',
+                description: 'URL to extract content from'
+              },
+              includeLinks: {
+                type: 'boolean',
+                default: true,
+                description: 'Include hyperlinks with categorization'
+              },
+              format: {
+                type: 'string',
+                enum: ['markdown', 'text'],
+                default: 'markdown',
+                description: 'Output format'
+              },
+              browser: {
+                type: 'string',
+                enum: ['chromium', 'firefox', 'webkit'],
+                default: 'chromium',
+                description: 'Browser engine to use'
+              }
+            },
+            required: ['url']
+          }
         }
       ]
     }));
@@ -501,6 +532,8 @@ class WebScraperServer {
             return await this.testDropdownWithErrorCapture(args);
           case 'wait_for_element':
             return await this.waitForElement(args);
+          case 'extract_content':
+            return await this.extractContent(args);
           default:
             throw new Error(`Unknown tool: ${name}`);
         }
@@ -1564,6 +1597,142 @@ ${takeScreenshots ? `
 ` : ''}`
           }
         ]
+      };
+    } finally {
+      await context.close();
+      await browser.close();
+    }
+  }
+
+  async extractContent(args) {
+    this.validateArgs(args, ['url']);
+    const { url, includeLinks = true, format = 'markdown', browser: browserType = 'chromium' } = args;
+
+    const { browser, context } = await this.getBrowser(browserType);
+    const page = await context.newPage();
+
+    try {
+      await page.goto(url, { waitUntil: 'networkidle' });
+      
+      // Wait for React hydration for SPA sites
+      await this.waitForReactHydration(page);
+
+      const content = await page.evaluate(({ includeLinks, format }) => {
+        // Remove non-content elements
+        const removeSelectors = [
+          'nav', 'header', 'footer', 'aside', '.sidebar', '.navigation',
+          '.menu', '.ads', '.advertisement', '.social', '.share',
+          'script', 'style', 'noscript', '.cookie', '.popup'
+        ];
+        
+        removeSelectors.forEach(sel => {
+          document.querySelectorAll(sel).forEach(el => el.remove());
+        });
+
+        const result = { content: '', links: [] };
+        let linkCounter = 1;
+        const linkMap = new Map();
+
+        const categorizeLink = (href, baseUrl) => {
+          try {
+            const url = new URL(href, baseUrl);
+            const base = new URL(baseUrl);
+            
+            if (url.hostname === base.hostname) return 'internal';
+            if (href.startsWith('#')) return 'anchor';
+            if (href.match(/\.(pdf|doc|docx|zip|tar|gz)$/i)) return 'download';
+            return 'external';
+          } catch {
+            return 'invalid';
+          }
+        };
+
+        const processElement = (element) => {
+          let text = '';
+
+          switch (element.tagName.toLowerCase()) {
+            case 'h1':
+              text += format === 'markdown' ? `# ${element.textContent.trim()}\n\n` : `${element.textContent.trim()}\n${'='.repeat(element.textContent.trim().length)}\n\n`;
+              break;
+            case 'h2':
+              text += format === 'markdown' ? `## ${element.textContent.trim()}\n\n` : `${element.textContent.trim()}\n${'-'.repeat(element.textContent.trim().length)}\n\n`;
+              break;
+            case 'h3':
+            case 'h4':
+            case 'h5':
+            case 'h6':
+              const hLevel = parseInt(element.tagName[1]);
+              text += format === 'markdown' ? `${'#'.repeat(hLevel)} ${element.textContent.trim()}\n\n` : `${element.textContent.trim()}\n\n`;
+              break;
+            case 'p':
+              let pText = element.textContent.trim();
+              if (includeLinks) {
+                const links = element.querySelectorAll('a[href]');
+                links.forEach(link => {
+                  const href = link.getAttribute('href');
+                  const linkText = link.textContent.trim();
+                  if (href && linkText && !linkMap.has(href)) {
+                    linkMap.set(href, {
+                      id: linkCounter,
+                      text: linkText,
+                      url: href,
+                      type: categorizeLink(href, window.location.href)
+                    });
+                    result.links.push(linkMap.get(href));
+                    linkCounter++;
+                  }
+                  if (linkMap.has(href)) {
+                    pText = pText.replace(linkText, `${linkText} [${linkMap.get(href).id}]`);
+                  }
+                });
+              }
+              text += `${pText}\n\n`;
+              break;
+            case 'ul':
+            case 'ol':
+              const items = element.querySelectorAll('li');
+              items.forEach((item, i) => {
+                const bullet = element.tagName.toLowerCase() === 'ul' ? '-' : `${i + 1}.`;
+                text += `${bullet} ${item.textContent.trim()}\n`;
+              });
+              text += '\n';
+              break;
+            case 'pre':
+              text += format === 'markdown' ? `\`\`\`\n${element.textContent.trim()}\n\`\`\`\n\n` : `${element.textContent.trim()}\n\n`;
+              break;
+            case 'code':
+              text += format === 'markdown' ? `\`${element.textContent.trim()}\`` : element.textContent.trim();
+              break;
+            case 'blockquote':
+              text += format === 'markdown' ? `> ${element.textContent.trim()}\n\n` : `"${element.textContent.trim()}"\n\n`;
+              break;
+          }
+          return text;
+        };
+
+        // Process main content elements
+        const contentElements = document.querySelectorAll('h1, h2, h3, h4, h5, h6, p, ul, ol, pre, code, blockquote');
+        contentElements.forEach(el => {
+          result.content += processElement(el);
+        });
+
+        return result;
+      }, { includeLinks, format });
+
+      let output = content.content;
+
+      if (includeLinks && content.links.length > 0) {
+        output += '\n---\n## Links Found:\n';
+        content.links.forEach(link => {
+          output += `[${link.id}] ${link.url} (${link.type})\n`;
+        });
+      }
+
+      return {
+        content: [{
+          type: 'text',
+          text: `Content extracted from ${url}:\n\n${output}`
+        }]
       };
     } finally {
       await context.close();

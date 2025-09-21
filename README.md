@@ -108,7 +108,41 @@ Provides comprehensive information for any web page with React-specific insights
 }
 ```
 
-### 4. `wait_for_element` - Smart Element Waiting
+### 4. `extract_content` - Clean Content Extraction
+Extract clean, readable content from web pages without HTML/CSS clutter. Perfect for documentation, articles, and structured content consumption.
+
+```javascript
+{
+  url: "https://docs.example.com/api-guide",
+  includeLinks: true,    // Extract and categorize hyperlinks
+  format: "markdown"     // Output format: 'markdown' or 'text'
+}
+```
+
+**Output Example:**
+```markdown
+# API Documentation
+
+## Authentication
+You need to obtain an API key [1] from the developer portal [2].
+
+### Rate Limits
+See the rate limiting guide [3] for details.
+
+---
+## Links Found:
+[1] https://example.com/api-keys (internal)
+[2] https://developer.example.com (external) 
+[3] https://example.com/docs/rate-limits (internal)
+```
+
+**Features:**
+- **Clean Structure** - Preserves headings, paragraphs, lists, code blocks
+- **Link Extraction** - Categorizes links as internal, external, anchor, or download
+- **Content Filtering** - Removes navigation, ads, sidebars automatically
+- **Multiple Formats** - Markdown or plain text output
+
+### 5. `wait_for_element` - Smart Element Waiting
 Intelligent element waiting with automatic selector strategy fallbacks.
 
 ```javascript
@@ -121,16 +155,16 @@ Intelligent element waiting with automatic selector strategy fallbacks.
 
 ## React Native Web Specific Tools
 
-### 5. `inspect_react_app` - React Component Analysis
+### 6. `inspect_react_app` - React Component Analysis
 Deep inspection of React applications (works best with React Native web).
 
-### 6. `wait_for_react_state` - React State Management
+### 7. `wait_for_react_state` - React State Management
 Wait for React-specific conditions like hydration, navigation, data loading.
 
-### 7. `execute_in_react_context` - JavaScript Execution
+### 8. `execute_in_react_context` - JavaScript Execution
 Execute JavaScript in React context for advanced inspection.
 
-### 8. `check_expo_dev_server` - Expo Development Tools
+### 9. `check_expo_dev_server` - Expo Development Tools
 Check Expo/Metro bundler status for development workflows.
 
 ## Selector Strategy Priority
@@ -182,6 +216,16 @@ This ensures **regular CSS selectors work normally** while providing React Nativ
 }
 ```
 
+### Clean Content Extraction
+```javascript
+// Extract clean content from documentation
+{
+  url: "https://docs.react.dev/learn",
+  includeLinks: true,
+  format: "markdown"
+}
+```
+
 ## Installation
 
 ```bash
@@ -200,6 +244,9 @@ q chat "Test the login flow on my React app at localhost:3000"
 
 # Enhanced React Native web support
 q chat "Inspect the React Native web app at localhost:8081"
+
+# Extract clean content for reading
+q chat "Extract the main content from https://docs.react.dev/learn"
 ```
 
 ## Troubleshooting
