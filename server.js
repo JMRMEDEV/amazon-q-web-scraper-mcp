@@ -6,6 +6,22 @@ import { CallToolRequestSchema, ListToolsRequestSchema } from '@modelcontextprot
 import { chromium, firefox, webkit, devices } from 'playwright';
 import fs from 'fs';
 
+// Constants
+const TIMEOUTS = {
+  DEFAULT: 10000,
+  HYDRATION: 15000,
+  NAVIGATION: 5000,
+  SCREENSHOT_WAIT: 3000
+};
+
+const MOBILE_VIEWPORT = {
+  width: 375,
+  height: 667,
+  userAgent: 'Mozilla/5.0 (iPhone; CPU iPhone OS 14_7_1 like Mac OS X) AppleWebKit/605.1.15 (KHTML, like Gecko) Version/14.1.2 Mobile/15E148 Safari/604.1'
+};
+
+const BROWSER_ARGS = ['--no-sandbox', '--disable-setuid-sandbox'];
+
 class WebScraperServer {
   constructor() {
     this.server = new Server(
@@ -21,8 +37,10 @@ class WebScraperServer {
     );
 
     this.setupToolHandlers();
-    
-    // Error handling
+    this.setupErrorHandling();
+  }
+
+  setupErrorHandling() {
     this.server.onerror = (error) => console.error('[MCP Error]', error);
     process.on('SIGINT', async () => {
       await this.server.close();
@@ -30,32 +48,114 @@ class WebScraperServer {
     });
   }
 
+  // Utility methods
+  validateArgs(args, required = []) {
+    if (!args) throw new Error('Arguments are required');
+    for (const field of required) {
+      if (!args[field]) throw new Error(`Missing required field: ${field}`);
+    }
+  }
+
+  async getBrowser(browserType = 'chromium', deviceName = null) {
+    const browsers = { chromium, firefox, webkit };
+    const browser = await browsers[browserType].launch({ 
+      headless: true,
+      args: BROWSER_ARGS
+    });
+    
+    const context = deviceName && devices[deviceName] 
+      ? await browser.newContext(devices[deviceName])
+      : await browser.newContext();
+      
+    return { browser, context };
+  }
+
+  async setupMobileViewport(page, deviceName = null) {
+    if (deviceName && devices[deviceName]) return;
+    
+    await page.setViewportSize({ width: MOBILE_VIEWPORT.width, height: MOBILE_VIEWPORT.height });
+    await page.setExtraHTTPHeaders({ 'User-Agent': MOBILE_VIEWPORT.userAgent });
+  }
+
+  async findElement(page, selector, timeout = TIMEOUTS.DEFAULT) {
+    const selectors = [
+      selector,
+      `[data-testid="${selector}"]`,
+      `[aria-label="${selector}"]`,
+      `[accessibilityLabel="${selector}"]`
+    ];
+    
+    for (const sel of selectors) {
+      try {
+        await page.waitForSelector(sel, { timeout: timeout / selectors.length });
+        return { element: await page.$(sel), usedSelector: sel };
+      } catch (e) {
+        continue;
+      }
+    }
+    throw new Error(`Element not found with any selector: ${selector}`);
+  }
+
+  async waitForReactHydration(page, timeout = TIMEOUTS.HYDRATION) {
+    try {
+      await page.waitForFunction(() => {
+        return window.React || window.__REACT_DEVTOOLS_GLOBAL_HOOK__ || 
+               document.querySelector('[data-reactroot]') ||
+               document.querySelector('#root [data-testid]') ||
+               document.querySelector('.expo-web-view');
+      }, { timeout });
+
+      await page.waitForTimeout(1000);
+      
+      const loadingSelectors = [
+        '[data-testid*="loading"]',
+        '[data-testid*="spinner"]', 
+        '.loading',
+        '.spinner',
+        '[aria-label*="loading"]'
+      ];
+      
+      for (const selector of loadingSelectors) {
+        try {
+          await page.waitForSelector(selector, { state: 'detached', timeout: 5000 });
+        } catch (e) {
+          // Loading indicator might not exist, continue
+        }
+      }
+      
+      return true;
+    } catch (error) {
+      console.warn('React hydration wait failed:', error.message);
+      return false;
+    }
+  }
+
   setupToolHandlers() {
     this.server.setRequestHandler(ListToolsRequestSchema, async () => ({
       tools: [
-		{
-		  name: 'inspect_element',
-		  description: 'Inspect a DOM element by selector and return its attributes, text, and computed styles',
-		  inputSchema: {
-		    type: 'object',
-		    properties: {
-		      url: { type: 'string', description: 'Page URL to inspect' },
-		      selector: { type: 'string', description: 'CSS selector of element' },
-		      properties: {
-		        type: 'array',
-		        items: { type: 'string' },
-		        description: 'Optional list of CSS properties'
-		      },
-		      browser: {
-		        type: 'string',
-		        enum: ['chromium','firefox','webkit'],
-		        default: 'chromium'
-		      }
-		    },
-		    required: ['url','selector'],
-		    additionalProperties: false
-		  }
-		},	
+        {
+          name: 'inspect_element',
+          description: 'Inspect a DOM element by selector and return its attributes, text, and computed styles',
+          inputSchema: {
+            type: 'object',
+            properties: {
+              url: { type: 'string', description: 'Page URL to inspect' },
+              selector: { type: 'string', description: 'CSS selector of element' },
+              properties: {
+                type: 'array',
+                items: { type: 'string' },
+                description: 'Optional list of CSS properties'
+              },
+              browser: {
+                type: 'string',
+                enum: ['chromium','firefox','webkit'],
+                default: 'chromium'
+              }
+            },
+            required: ['url','selector'],
+            additionalProperties: false
+          }
+        },	
         {
           name: 'scrape_page',
           description: 'Scrape content from any web page (regular websites, React apps, or React Native web apps) using Playwright',
@@ -375,26 +475,14 @@ class WebScraperServer {
     }));
 
     this.server.setRequestHandler(CallToolRequestSchema, async (request) => {
-      console.error('[DEBUG raw request.params]', JSON.stringify(request.params, null, 2));
-
-      let { name, arguments: args } = request.params;
-      console.error('[DEBUG extracted name]', name);
-      console.error('[DEBUG extracted args type]', typeof args, 'isArray?', Array.isArray(args));
+      const { name, arguments: args } = request.params;
 
       try {
         switch (name) {
-		  case 'inspect_element': {
-		    console.error('[inspect_element] incoming args (pre-call):', (() => {
-		      try { return JSON.stringify(args, null, 2); } catch (e) { return String(args); }
-		    })());
-		    // Normalize in case Q sends args as an array or multiple params
-		    let normalized = args;
-		    if (Array.isArray(args)) {
-		      // If Q sent ["http://...", "#header"]
-		      normalized = { url: args[0], selector: args[1] };
-		    }
-		    return await this.inspectElement(normalized);
-		  }
+          case 'inspect_element': {
+            const normalized = Array.isArray(args) ? { url: args[0], selector: args[1] } : args;
+            return await this.inspectElement(normalized);
+          }
           case 'scrape_page':
             return await this.scrapePage(args);
           case 'inspect_react_app':
@@ -418,111 +506,31 @@ class WebScraperServer {
         }
       } catch (error) {
         return {
-          content: [
-            {
-              type: 'text',
-              text: `Error: ${error.message}`
-            }
-          ],
+          content: [{ type: 'text', text: `Error: ${error.message}` }],
           isError: true
         };
       }
     });
   }
 
-  async getBrowser(browserType = 'chromium', deviceName = null) {
-    const browsers = { chromium, firefox, webkit };
-    const browser = await browsers[browserType].launch({ 
-      headless: true,
-      args: ['--no-sandbox', '--disable-setuid-sandbox'] // Better for containerized environments
-    });
-    
-    const context = deviceName && devices[deviceName] 
-      ? await browser.newContext(devices[deviceName])
-      : await browser.newContext();
-      
-    return { browser, context };
-  }
+  async inspectElement(args) {
+    this.validateArgs(args, ['url', 'selector']);
+    const { url, selector, properties = [], browser: browserType = 'chromium' } = args;
 
-  async setupMobileViewport(page, deviceName = null) {
-    if (deviceName && devices[deviceName]) {
-      // Device emulation is handled in context creation
-      return;
-    }
-    
-    // Default mobile viewport for React Native web
-    await page.setViewportSize({ width: 375, height: 667 });
-    await page.setExtraHTTPHeaders({
-      'User-Agent': 'Mozilla/5.0 (iPhone; CPU iPhone OS 14_7_1 like Mac OS X) AppleWebKit/605.1.15 (KHTML, like Gecko) Version/14.1.2 Mobile/15E148 Safari/604.1'
-    });
-  }
-
-  async waitForReactHydration(page, timeout = 15000) {
-    try {
-      // Wait for React to be available
-      await page.waitForFunction(() => {
-        return window.React || window.__REACT_DEVTOOLS_GLOBAL_HOOK__ || 
-               document.querySelector('[data-reactroot]') ||
-               document.querySelector('#root [data-testid]') ||
-               document.querySelector('.expo-web-view');
-      }, { timeout });
-
-      // Additional wait for hydration to complete
-      await page.waitForTimeout(1000);
-      
-      // Check if there are any loading indicators
-      const loadingSelectors = [
-        '[data-testid*="loading"]',
-        '[data-testid*="spinner"]', 
-        '.loading',
-        '.spinner',
-        '[aria-label*="loading"]'
-      ];
-      
-      for (const selector of loadingSelectors) {
-        try {
-          await page.waitForSelector(selector, { state: 'detached', timeout: 5000 });
-        } catch (e) {
-          // Loading indicator might not exist, continue
-        }
-      }
-      
-      return true;
-    } catch (error) {
-      console.warn('React hydration wait failed:', error.message);
-      return false;
-    }
-  }
-
-async inspectElement(args) {
-  console.error('[DEBUG inspectElement entry]', JSON.stringify(args, null, 2));
-  const { url, selector, properties = [], browser: browserType = 'chromium' } = args || {};
-
-  try {
-    console.error('[DEBUG] About to call getBrowser with:', browserType);
     const { browser, context } = await this.getBrowser(browserType);
-    console.error('[DEBUG] getBrowser successful, creating page...');
     const page = await context.newPage();
-    console.error('[DEBUG] Page created, navigating to:', url);
 
     try {
       await page.goto(url, { waitUntil: 'networkidle' });
-      console.error('[DEBUG] Navigation successful, evaluating...');
 
       const data = await page.evaluate(({ selector: sel, properties: props }) => {
         const el = document.querySelector(sel);
         if (!el) return { error: `Element ${sel} not found` };
 
         const styles = window.getComputedStyle(el);
-        const selected =
-          props && props.length > 0
-            ? props.reduce((acc, p) => {
-                acc[p] = styles.getPropertyValue(p);
-                return acc;
-              }, {})
-            : Object.fromEntries(
-                Array.from(styles).map(p => [p, styles.getPropertyValue(p)])
-              );
+        const selected = props?.length > 0
+          ? props.reduce((acc, p) => { acc[p] = styles.getPropertyValue(p); return acc; }, {})
+          : Object.fromEntries(Array.from(styles).map(p => [p, styles.getPropertyValue(p)]));
 
         return {
           tag: el.tagName,
@@ -533,34 +541,21 @@ async inspectElement(args) {
         };
       }, { selector, properties });
 
-      console.error('[DEBUG] Evaluation successful, returning result');
       return {
-        content: [
-          {
-            type: 'text',
-            text: `Inspection result for ${selector} on ${url}:\n\n${JSON.stringify(
-              data,
-              null,
-              2
-            )}`
-          }
-        ]
+        content: [{
+          type: 'text',
+          text: `Inspection result for ${selector} on ${url}:\n\n${JSON.stringify(data, null, 2)}`
+        }]
       };
     } finally {
-      console.error('[DEBUG] Cleaning up browser resources...');
       await context.close();
       await browser.close();
-      console.error('[DEBUG] Browser cleanup complete');
     }
-  } catch (error) {
-    console.error('[DEBUG] Error in inspectElement:', error.message);
-    console.error('[DEBUG] Error stack:', error.stack);
-    throw error;
   }
-}
   
 
   async scrapePage(args) {
+    this.validateArgs(args, ['url']);
     const { 
       url, 
       selector, 
@@ -581,113 +576,47 @@ async inspectElement(args) {
 
       await page.goto(url, { waitUntil: 'networkidle' });
       
-      // Only wait for React hydration if explicitly requested or if it's clearly a React Native web app
       if (mobileViewport || device || url.includes('expo') || url.includes(':8081')) {
         await this.waitForReactHydration(page);
       }
       
-      // Wait for specific condition if provided
       if (waitFor) {
         if (waitFor.match(/^\d+$/)) {
           await page.waitForTimeout(parseInt(waitFor));
         } else {
-          // For regular web pages, try direct selector first, then fallback to React Native strategies
           try {
-            await page.waitForSelector(waitFor, { timeout: 8000 });
+            await this.findElement(page, waitFor);
           } catch (e) {
-            // Fallback to React Native web selector strategies
-            const selectors = [
-              `[data-testid="${waitFor}"]`,
-              `[accessibilityLabel="${waitFor}"]`,
-              `[aria-label="${waitFor}"]`
-            ];
-            
-            let found = false;
-            for (const sel of selectors) {
-              try {
-                await page.waitForSelector(sel, { timeout: 2000 });
-                found = true;
-                break;
-              } catch (e) {
-                continue;
-              }
-            }
-            
-            if (!found) {
-              throw new Error(`Element not found with any selector strategy: ${waitFor}`);
-            }
+            throw new Error(`Element not found with any selector strategy: ${waitFor}`);
           }
         }
       }
 
       let content;
       if (selector) {
-        // For regular web pages, try direct selector first
         try {
+          const { element } = await this.findElement(page, selector);
           const elements = await page.$$(selector);
-          if (elements.length > 0) {
-            content = await Promise.all(
-              elements.map(async (el) => await el.textContent())
-            );
-          } else {
-            throw new Error('No elements found with direct selector');
-          }
+          content = await Promise.all(elements.map(async (el) => await el.textContent()));
         } catch (e) {
-          // Fallback to React Native web selector strategies
-          const selectors = [
-            `[data-testid="${selector}"]`,
-            `[accessibilityLabel="${selector}"]`,
-            `[aria-label="${selector}"]`
-          ];
-          
-          let elements = [];
-          for (const sel of selectors) {
-            try {
-              elements = await page.$$(sel);
-              if (elements.length > 0) break;
-            } catch (e) {
-              continue;
-            }
-          }
-          
-          if (elements.length > 0) {
-            content = await Promise.all(
-              elements.map(async (el) => {
-                const text = await el.textContent();
-                const tagName = await el.evaluate(el => el.tagName);
-                const testId = await el.getAttribute('data-testid');
-                const accessibilityLabel = await el.getAttribute('aria-label');
-                
-                return {
-                  text: text?.trim(),
-                  tagName,
-                  testId,
-                  accessibilityLabel
-                };
-              })
-            );
-          } else {
-            content = 'No elements found with the provided selector';
-          }
+          content = 'No elements found with the provided selector';
         }
       } else {
         content = await page.textContent('body');
       }
 
       const result = {
-        content: [
-          {
-            type: 'text',
-            text: `Scraped content from ${url}:\n\n${
-              Array.isArray(content) 
-                ? content.map(item => typeof item === 'object' 
-                    ? `${item.tagName}: "${item.text}" (testId: ${item.testId}, label: ${item.accessibilityLabel})`
-                    : item
-                  ).join('\n---\n')
-                : content
-            }`
-          }
-        ]
+        content: [{
+          type: 'text',
+          text: `Scraped content from ${url}:\n\n${
+            Array.isArray(content) 
+              ? content.map(item => typeof item === 'object' 
+                  ? `${item.tagName}: "${item.text}" (testId: ${item.testId}, label: ${item.accessibilityLabel})`
+                  : item
+                ).join('\n---\n')
+              : content
+          }`
+        }]
       };
 
       if (screenshot) {
@@ -840,11 +769,12 @@ ${inspection.errors.join('\n')}
   }
 
   async waitForReactState(args) {
+    this.validateArgs(args, ['url', 'condition']);
     const { 
       url, 
       condition, 
       selector, 
-      timeout = 15000,
+      timeout = TIMEOUTS.HYDRATION,
       browser: browserType = 'chromium'
     } = args;
     
@@ -883,34 +813,14 @@ ${inspection.errors.join('\n')}
           break;
           
         case 'animation':
-          await page.waitForTimeout(2000); // Wait for animations to settle
+          await page.waitForTimeout(2000);
           result = '✅ Animation wait completed';
           break;
           
         case 'custom':
           if (!selector) throw new Error('Selector required for custom condition');
-          
-          const selectors = [
-            selector,
-            `[data-testid="${selector}"]`,
-            `[aria-label="${selector}"]`
-          ];
-          
-          let found = false;
-          for (const sel of selectors) {
-            try {
-              await page.waitForSelector(sel, { timeout: timeout / selectors.length });
-              found = true;
-              result = `✅ Custom condition met: ${sel}`;
-              break;
-            } catch (e) {
-              continue;
-            }
-          }
-          
-          if (!found) {
-            throw new Error(`Custom condition not met: ${selector}`);
-          }
+          const { usedSelector } = await this.findElement(page, selector, timeout);
+          result = `✅ Custom condition met: ${usedSelector}`;
           break;
           
         default:
@@ -920,12 +830,44 @@ ${inspection.errors.join('\n')}
       const waitTime = Date.now() - startTime;
       
       return {
-        content: [
-          {
-            type: 'text',
-            text: `${result}\nWait time: ${waitTime}ms`
-          }
-        ]
+        content: [{
+          type: 'text',
+          text: `${result}\nWait time: ${waitTime}ms`
+        }]
+      };
+    } finally {
+      await context.close();
+      await browser.close();
+    }
+  }
+
+  async waitForElement(args) {
+    this.validateArgs(args, ['url', 'selector']);
+    const { url, selector, timeout = TIMEOUTS.DEFAULT, browser: browserType = 'chromium' } = args;
+    
+    const { browser, context } = await this.getBrowser(browserType);
+    const page = await context.newPage();
+    
+    try {
+      await page.goto(url, { waitUntil: 'networkidle' });
+      
+      const startTime = Date.now();
+      const { element, usedSelector } = await this.findElement(page, selector, timeout);
+      
+      const waitTime = Date.now() - startTime;
+      const text = await element.textContent();
+      const isVisible = await element.isVisible();
+      const testId = await element.getAttribute('data-testid');
+      const accessibilityLabel = await element.getAttribute('aria-label');
+
+      return {
+        content: [{
+          type: 'text',
+          text: `✅ Element found: ${usedSelector}
+Wait time: ${waitTime}ms
+Visible: ${isVisible}
+Text content: "${text?.trim()}"${testId ? `\nTestID: ${testId}` : ''}${accessibilityLabel ? `\nAccessibility Label: ${accessibilityLabel}` : ''}`
+        }]
       };
     } finally {
       await context.close();
@@ -1237,6 +1179,7 @@ Page Elements:
   }
 
   async testReactApp(args) {
+    this.validateArgs(args, ['url', 'actions']);
     const { 
       url, 
       actions, 
@@ -1263,7 +1206,7 @@ Page Elements:
       }
 
       for (const action of actions) {
-        const { type, selector, value, timeout = 10000, coordinates } = action;
+        const { type, selector, value, timeout = TIMEOUTS.DEFAULT, coordinates } = action;
         
         try {
           switch (type) {
@@ -1329,12 +1272,10 @@ Page Elements:
       }
 
       return {
-        content: [
-          {
-            type: 'text',
-            text: `React Native Web App Test Results:\n\n${results.join('\n')}`
-          }
-        ]
+        content: [{
+          type: 'text',
+          text: `React Native Web App Test Results:\n\n${results.join('\n')}`
+        }]
       };
     } finally {
       await context.close();
@@ -1342,127 +1283,29 @@ Page Elements:
     }
   }
 
-  // Helper methods for React app interactions (works with regular React and React Native web)
+  // Helper methods for React app interactions
   async performClick(page, selector, timeout) {
-    // Try direct CSS selector first (for regular web pages)
-    try {
-      await page.click(selector, { timeout: timeout * 0.7 });
-      return;
-    } catch (e) {
-      // Fallback to React Native web selector strategies
-      const selectors = [
-        `[data-testid="${selector}"]`,
-        `[aria-label="${selector}"]`,
-        `[accessibilityLabel="${selector}"]`
-      ];
-      
-      for (const sel of selectors) {
-        try {
-          await page.click(sel, { timeout: timeout * 0.1 });
-          return;
-        } catch (e) {
-          continue;
-        }
-      }
-    }
-    throw new Error(`Element not found with any selector: ${selector}`);
+    const { element } = await this.findElement(page, selector, timeout);
+    await element.click();
   }
 
   async performFill(page, selector, value, timeout) {
-    // Try direct CSS selector first
-    try {
-      await page.fill(selector, value, { timeout: timeout * 0.7 });
-      return;
-    } catch (e) {
-      // Fallback to React Native web selector strategies
-      const selectors = [
-        `[data-testid="${selector}"]`,
-        `input[aria-label="${selector}"]`,
-        `textarea[aria-label="${selector}"]`
-      ];
-      
-      for (const sel of selectors) {
-        try {
-          await page.fill(sel, value, { timeout: timeout * 0.1 });
-          return;
-        } catch (e) {
-          continue;
-        }
-      }
-    }
-    throw new Error(`Input element not found with any selector: ${selector}`);
+    const { element } = await this.findElement(page, selector, timeout);
+    await element.fill(value);
   }
 
   async performWait(page, selector, timeout) {
-    // Try direct CSS selector first
-    try {
-      await page.waitForSelector(selector, { timeout: timeout * 0.7 });
-      return;
-    } catch (e) {
-      // Fallback to React Native web selector strategies
-      const selectors = [
-        `[data-testid="${selector}"]`,
-        `[aria-label="${selector}"]`
-      ];
-      
-      for (const sel of selectors) {
-        try {
-          await page.waitForSelector(sel, { timeout: timeout * 0.15 });
-          return;
-        } catch (e) {
-          continue;
-        }
-      }
-    }
-    throw new Error(`Element not found with any selector: ${selector}`);
+    await this.findElement(page, selector, timeout);
   }
 
   async getElementText(page, selector, timeout) {
-    // Try direct CSS selector first
-    try {
-      const element = await page.waitForSelector(selector, { timeout: timeout * 0.7 });
-      return await element.textContent();
-    } catch (e) {
-      // Fallback to React Native web selector strategies
-      const selectors = [
-        `[data-testid="${selector}"]`,
-        `[aria-label="${selector}"]`
-      ];
-      
-      for (const sel of selectors) {
-        try {
-          const element = await page.waitForSelector(sel, { timeout: timeout * 0.15 });
-          return await element.textContent();
-        } catch (e) {
-          continue;
-        }
-      }
-    }
-    throw new Error(`Element not found with any selector: ${selector}`);
+    const { element } = await this.findElement(page, selector, timeout);
+    return await element.textContent();
   }
 
   async getElementAttribute(page, selector, attribute, timeout) {
-    // Try direct CSS selector first
-    try {
-      const element = await page.waitForSelector(selector, { timeout: timeout * 0.7 });
-      return await element.getAttribute(attribute);
-    } catch (e) {
-      // Fallback to React Native web selector strategies
-      const selectors = [
-        `[data-testid="${selector}"]`,
-        `[aria-label="${selector}"]`
-      ];
-      
-      for (const sel of selectors) {
-        try {
-          const element = await page.waitForSelector(sel, { timeout: timeout * 0.15 });
-          return await element.getAttribute(attribute);
-        } catch (e) {
-          continue;
-        }
-      }
-    }
-    throw new Error(`Element not found with any selector: ${selector}`);
+    const { element } = await this.findElement(page, selector, timeout);
+    return await element.getAttribute(attribute);
   }
 
   async performSwipe(page, selector, direction, coordinates, timeout) {
@@ -1719,72 +1562,6 @@ ${takeScreenshots ? `
 - Before: ${beforeScreenshot}
 - After: ${afterScreenshot}
 ` : ''}`
-          }
-        ]
-      };
-    } finally {
-      await context.close();
-      await browser.close();
-    }
-  }
-
-  async waitForElement(args) {
-    const { url, selector, timeout = 10000, browser: browserType = 'chromium' } = args;
-    
-    const { browser, context } = await this.getBrowser(browserType);
-    const page = await context.newPage();
-    
-    try {
-      await page.goto(url, { waitUntil: 'networkidle' });
-      
-      const startTime = Date.now();
-      
-      let element = null;
-      let usedSelector = '';
-      
-      // Try direct CSS selector first (for regular web pages)
-      try {
-        await page.waitForSelector(selector, { timeout: timeout * 0.7 });
-        element = await page.$(selector);
-        usedSelector = selector;
-      } catch (e) {
-        // Fallback to React Native web selector strategies
-        const selectors = [
-          `[data-testid="${selector}"]`,
-          `[aria-label="${selector}"]`,
-          `[accessibilityLabel="${selector}"]`
-        ];
-        
-        for (const sel of selectors) {
-          try {
-            await page.waitForSelector(sel, { timeout: timeout * 0.1 });
-            element = await page.$(sel);
-            usedSelector = sel;
-            break;
-          } catch (e) {
-            continue;
-          }
-        }
-      }
-      
-      if (!element) {
-        throw new Error(`Element not found with any selector: ${selector}`);
-      }
-      
-      const waitTime = Date.now() - startTime;
-      const text = await element.textContent();
-      const isVisible = await element.isVisible();
-      const testId = await element.getAttribute('data-testid');
-      const accessibilityLabel = await element.getAttribute('aria-label');
-
-      return {
-        content: [
-          {
-            type: 'text',
-            text: `✅ Element found: ${usedSelector}
-Wait time: ${waitTime}ms
-Visible: ${isVisible}
-Text content: "${text?.trim()}"${testId ? `\nTestID: ${testId}` : ''}${accessibilityLabel ? `\nAccessibility Label: ${accessibilityLabel}` : ''}`
           }
         ]
       };
