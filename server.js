@@ -5,6 +5,8 @@ import { StdioServerTransport } from '@modelcontextprotocol/sdk/server/stdio.js'
 import { CallToolRequestSchema, ListToolsRequestSchema } from '@modelcontextprotocol/sdk/types.js';
 import { chromium, firefox, webkit, devices } from 'playwright';
 import fs from 'fs';
+import { createCanvas, loadImage } from 'canvas';
+import sharp from 'sharp';
 
 // Constants
 const TIMEOUTS = {
@@ -501,6 +503,89 @@ class WebScraperServer {
             },
             required: ['url']
           }
+        },
+        {
+          name: 'take_screenshot',
+          description: 'Take screenshot of a page without extracting HTML/CSS content',
+          inputSchema: {
+            type: 'object',
+            properties: {
+              url: {
+                type: 'string',
+                description: 'URL to capture screenshot from'
+              },
+              browser: {
+                type: 'string',
+                enum: ['chromium', 'firefox', 'webkit'],
+                default: 'chromium',
+                description: 'Browser engine to use'
+              },
+              device: {
+                type: 'string',
+                description: 'Device to emulate (e.g., "iPhone 12", "Pixel 5")'
+              },
+              fullPage: {
+                type: 'boolean',
+                default: true,
+                description: 'Capture full page or just viewport'
+              },
+              waitForSPA: {
+                type: 'boolean',
+                default: true,
+                description: 'Wait for SPA frameworks to load and hydrate'
+              }
+            },
+            required: ['url']
+          }
+        },
+        {
+          name: 'compare_screenshots',
+          description: 'Take screenshots of two pages and compare them visually for layout, colors, and typography',
+          inputSchema: {
+            type: 'object',
+            properties: {
+              urlA: {
+                type: 'string',
+                description: 'First page (source)'
+              },
+              urlB: {
+                type: 'string',
+                description: 'Second page (target)'
+              },
+              browser: {
+                type: 'string',
+                enum: ['chromium', 'firefox', 'webkit'],
+                default: 'chromium',
+                description: 'Browser engine to use'
+              },
+              threshold: {
+                type: 'number',
+                default: 0.1,
+                description: 'Allowed difference ratio (0–1)'
+              },
+              analyzeLayout: {
+                type: 'boolean',
+                default: true,
+                description: 'Analyze layout positioning and alignment'
+              },
+              analyzeColors: {
+                type: 'boolean',
+                default: true,
+                description: 'Analyze exact color differences'
+              },
+              analyzeTypography: {
+                type: 'boolean',
+                default: true,
+                description: 'Analyze font sizes, weights, and spacing'
+              },
+              waitForSPA: {
+                type: 'boolean',
+                default: true,
+                description: 'Wait for SPA frameworks to load and hydrate'
+              }
+            },
+            required: ['urlA', 'urlB']
+          }
         }
       ]
     }));
@@ -534,6 +619,10 @@ class WebScraperServer {
             return await this.waitForElement(args);
           case 'extract_content':
             return await this.extractContent(args);
+          case 'take_screenshot':
+            return await this.takeScreenshot(args);
+          case 'compare_screenshots':
+            return await this.compareScreenshots(args);
           default:
             throw new Error(`Unknown tool: ${name}`);
         }
@@ -1740,12 +1829,461 @@ ${takeScreenshots ? `
     }
   }
 
+  async isSPA(page) {
+    // Runtime detection of SPA frameworks
+    return await page.evaluate(() => {
+      return !!(
+        window.React ||
+        window.Vue ||
+        window.angular ||
+        window.ng ||
+        window.__REACT_DEVTOOLS_GLOBAL_HOOK__ ||
+        document.querySelector('[data-reactroot]') ||
+        document.querySelector('#root') ||
+        document.querySelector('#app') ||
+        document.querySelector('[ng-version]') ||
+        document.querySelector('[data-vue-app]') ||
+        document.querySelector('script[src*="react"]') ||
+        document.querySelector('script[src*="vue"]') ||
+        document.querySelector('script[src*="angular"]') ||
+        document.querySelector('meta[name="generator"][content*="React"]') ||
+        document.querySelector('meta[name="generator"][content*="Vue"]') ||
+        document.querySelector('meta[name="generator"][content*="Angular"]')
+      );
+    });
+  }
+
+  async waitForSPAReady(page, timeout = 10000) {
+    try {
+      // Wait for common frameworks
+      await page.waitForFunction(() => {
+        return window.React || 
+               window.Vue || 
+               window.angular || 
+               window.ng ||
+               document.querySelector('[data-reactroot]') ||
+               document.querySelector('#root') ||
+               document.querySelector('#app') ||
+               document.querySelector('.vue-app') ||
+               document.querySelector('[ng-version]');
+      }, { timeout: 5000 });
+
+      // Wait for loading indicators to disappear
+      const loadingSelectors = [
+        '[data-testid*="loading"]',
+        '[data-testid*="spinner"]',
+        '.loading', '.spinner', '.loader',
+        '[aria-label*="loading"]',
+        '[class*="loading"]',
+        '[class*="spinner"]'
+      ];
+
+      for (const selector of loadingSelectors) {
+        try {
+          await page.waitForSelector(selector, { state: 'detached', timeout: 2000 });
+        } catch (e) {
+          // Selector not found or didn't disappear - continue
+        }
+      }
+
+      // Additional wait for content to stabilize
+      await page.waitForTimeout(1000);
+      
+    } catch (e) {
+      // Fallback: just wait a bit longer
+      await page.waitForTimeout(3000);
+    }
+  }
+
+  async takeScreenshot(args) {
+    this.validateArgs(args, ['url']);
+    const { url, browser: browserType = 'chromium', device, fullPage = true, waitForSPA = true } = args;
+
+    const { browser, context } = await this.getBrowser(browserType, device);
+    const page = await context.newPage();
+
+    try {
+      await page.goto(url, { waitUntil: 'networkidle' });
+      
+      if (waitForSPA && await this.isSPA(page)) {
+        await this.waitForSPAReady(page);
+      } else if (url.includes('expo') || url.includes(':8081')) {
+        await this.waitForReactHydration(page);
+      }
+
+      const screenshot = await page.screenshot({ 
+        fullPage,
+        type: 'png'
+      });
+
+      return {
+        content: [{
+          type: 'text',
+          text: `Screenshot captured from ${url}`
+        }],
+        screenshot: screenshot.toString('base64')
+      };
+    } finally {
+      await context.close();
+      await browser.close();
+    }
+  }
+
+  async compareScreenshots(args) {
+    this.validateArgs(args, ['urlA', 'urlB']);
+    const { 
+      urlA, 
+      urlB, 
+      browser: browserType = 'chromium', 
+      threshold = 0.1,
+      analyzeLayout = true,
+      analyzeColors = true,
+      analyzeTypography = true,
+      waitForSPA = true
+    } = args;
+
+    const { browser, context } = await this.getBrowser(browserType);
+    
+    try {
+      // Take screenshots
+      const [pageA, pageB] = await Promise.all([
+        context.newPage(),
+        context.newPage()
+      ]);
+
+      await Promise.all([
+        pageA.goto(urlA, { waitUntil: 'networkidle' }),
+        pageB.goto(urlB, { waitUntil: 'networkidle' })
+      ]);
+
+      // Wait for SPAs to be ready
+      if (waitForSPA) {
+        const waitPromises = [];
+        if (await this.isSPA(pageA)) waitPromises.push(this.waitForSPAReady(pageA));
+        if (await this.isSPA(pageB)) waitPromises.push(this.waitForSPAReady(pageB));
+        await Promise.all(waitPromises);
+      } else {
+        // Fallback to existing React hydration logic
+        if (urlA.includes('expo') || urlA.includes(':8081')) {
+          await this.waitForReactHydration(pageA);
+        }
+        if (urlB.includes('expo') || urlB.includes(':8081')) {
+          await this.waitForReactHydration(pageB);
+        }
+      }
+
+      const [screenshotA, screenshotB] = await Promise.all([
+        pageA.screenshot({ fullPage: true, type: 'png' }),
+        pageB.screenshot({ fullPage: true, type: 'png' })
+      ]);
+
+      // Analyze images
+      const analysis = await this.analyzeVisualDifferences(
+        screenshotA, 
+        screenshotB, 
+        { analyzeLayout, analyzeColors, analyzeTypography, threshold }
+      );
+
+      return {
+        content: [{
+          type: 'text',
+          text: `Visual comparison between ${urlA} and ${urlB}:\n\n${this.formatAnalysisResults(analysis)}`
+        }],
+        analysis
+      };
+    } finally {
+      await context.close();
+      await browser.close();
+    }
+  }
+
+  async analyzeVisualDifferences(imageA, imageB, options) {
+    const { analyzeLayout, analyzeColors, analyzeTypography, threshold } = options;
+    
+    // Convert images to Sharp objects for processing
+    const imgA = sharp(imageA);
+    const imgB = sharp(imageB);
+    
+    const [metaA, metaB] = await Promise.all([
+      imgA.metadata(),
+      imgB.metadata()
+    ]);
+
+    const analysis = {
+      dimensions: {
+        source: { width: metaA.width, height: metaA.height },
+        target: { width: metaB.width, height: metaB.height },
+        match: metaA.width === metaB.width && metaA.height === metaB.height
+      },
+      layout: {},
+      colors: {},
+      typography: {},
+      similarity: 0
+    };
+
+    // Resize images to same dimensions for comparison
+    const minWidth = Math.min(metaA.width, metaB.width);
+    const minHeight = Math.min(metaA.height, metaB.height);
+
+    const [bufferA, bufferB] = await Promise.all([
+      imgA.resize(minWidth, minHeight).raw().toBuffer(),
+      imgB.resize(minWidth, minHeight).raw().toBuffer()
+    ]);
+
+    if (analyzeLayout) {
+      analysis.layout = await this.analyzeLayout(bufferA, bufferB, minWidth, minHeight);
+    }
+
+    if (analyzeColors) {
+      analysis.colors = await this.analyzeColors(bufferA, bufferB);
+    }
+
+    if (analyzeTypography) {
+      analysis.typography = await this.analyzeTypography(bufferA, bufferB, minWidth, minHeight);
+    }
+
+    // Calculate overall similarity
+    let totalDiff = 0;
+    const totalPixels = minWidth * minHeight * 3; // RGB channels
+    
+    for (let i = 0; i < bufferA.length; i++) {
+      totalDiff += Math.abs(bufferA[i] - bufferB[i]);
+    }
+    
+    analysis.similarity = 1 - (totalDiff / (totalPixels * 255));
+    analysis.similar = analysis.similarity >= (1 - threshold);
+
+    return analysis;
+  }
+
+  async analyzeLayout(bufferA, bufferB, width, height) {
+    // Grid-based layout analysis
+    const gridSize = 20; // 20x20 grid
+    const cellWidth = Math.floor(width / gridSize);
+    const cellHeight = Math.floor(height / gridSize);
+    
+    const layoutDiffs = [];
+    
+    for (let row = 0; row < gridSize; row++) {
+      for (let col = 0; col < gridSize; col++) {
+        const cellDiff = this.compareCellContent(
+          bufferA, bufferB, 
+          col * cellWidth, row * cellHeight, 
+          cellWidth, cellHeight, 
+          width
+        );
+        
+        if (cellDiff > 0.3) { // Significant difference threshold
+          const position = this.getCellPosition(row, col, gridSize);
+          layoutDiffs.push({
+            region: `${position.vertical}-${position.horizontal}`,
+            difference: cellDiff,
+            coordinates: { row, col }
+          });
+        }
+      }
+    }
+
+    return {
+      gridAnalysis: `${layoutDiffs.length} regions with significant layout differences`,
+      majorDifferences: layoutDiffs.slice(0, 5), // Top 5 differences
+      alignment: this.detectAlignmentDifferences(layoutDiffs)
+    };
+  }
+
+  compareCellContent(bufferA, bufferB, startX, startY, cellWidth, cellHeight, imageWidth) {
+    let totalDiff = 0;
+    let pixelCount = 0;
+    
+    for (let y = startY; y < startY + cellHeight; y++) {
+      for (let x = startX; x < startX + cellWidth; x++) {
+        const pixelIndex = (y * imageWidth + x) * 3;
+        if (pixelIndex + 2 < bufferA.length) {
+          totalDiff += Math.abs(bufferA[pixelIndex] - bufferB[pixelIndex]); // R
+          totalDiff += Math.abs(bufferA[pixelIndex + 1] - bufferB[pixelIndex + 1]); // G
+          totalDiff += Math.abs(bufferA[pixelIndex + 2] - bufferB[pixelIndex + 2]); // B
+          pixelCount += 3;
+        }
+      }
+    }
+    
+    return pixelCount > 0 ? totalDiff / (pixelCount * 255) : 0;
+  }
+
+  getCellPosition(row, col, gridSize) {
+    const verticalPos = row < gridSize / 3 ? 'top' : 
+                      row > (2 * gridSize / 3) ? 'bottom' : 'center';
+    const horizontalPos = col < gridSize / 3 ? 'left' : 
+                         col > (2 * gridSize / 3) ? 'right' : 'center';
+    
+    return { vertical: verticalPos, horizontal: horizontalPos };
+  }
+
+  detectAlignmentDifferences(layoutDiffs) {
+    const regions = layoutDiffs.map(d => d.region);
+    const alignmentIssues = [];
+    
+    if (regions.some(r => r.includes('center-left')) && regions.some(r => r.includes('center-center'))) {
+      alignmentIssues.push('Content appears centered in source but left-aligned in target');
+    }
+    if (regions.some(r => r.includes('center-right')) && regions.some(r => r.includes('center-center'))) {
+      alignmentIssues.push('Content appears centered in source but right-aligned in target');
+    }
+    
+    return alignmentIssues;
+  }
+
+  async analyzeColors(bufferA, bufferB) {
+    const colorDiffs = [];
+    const sampleSize = 1000; // Sample 1000 pixels for color analysis
+    
+    for (let i = 0; i < sampleSize; i++) {
+      const pixelIndex = Math.floor(Math.random() * (bufferA.length / 3)) * 3;
+      
+      const colorA = {
+        r: bufferA[pixelIndex],
+        g: bufferA[pixelIndex + 1],
+        b: bufferA[pixelIndex + 2]
+      };
+      
+      const colorB = {
+        r: bufferB[pixelIndex],
+        g: bufferB[pixelIndex + 1],
+        b: bufferB[pixelIndex + 2]
+      };
+      
+      const diff = Math.sqrt(
+        Math.pow(colorA.r - colorB.r, 2) +
+        Math.pow(colorA.g - colorB.g, 2) +
+        Math.pow(colorA.b - colorB.b, 2)
+      );
+      
+      if (diff > 30) { // Significant color difference
+        colorDiffs.push({
+          source: `rgb(${colorA.r}, ${colorA.g}, ${colorA.b})`,
+          target: `rgb(${colorB.r}, ${colorB.g}, ${colorB.b})`,
+          difference: Math.round(diff)
+        });
+      }
+    }
+
+    return {
+      significantDifferences: colorDiffs.length,
+      examples: colorDiffs.slice(0, 10), // Top 10 color differences
+      summary: colorDiffs.length > 50 ? 'Major color palette differences detected' :
+               colorDiffs.length > 10 ? 'Moderate color differences detected' :
+               'Minor or no color differences detected'
+    };
+  }
+
+  async analyzeTypography(bufferA, bufferB, width, height) {
+    // Text region detection through edge analysis
+    const textRegions = this.detectTextRegions(bufferA, bufferB, width, height);
+    
+    return {
+      textRegionsAnalyzed: textRegions.length,
+      differences: textRegions.filter(r => r.hasSignificantDifference),
+      summary: textRegions.length > 0 ? 
+        `Analyzed ${textRegions.length} text regions, ${textRegions.filter(r => r.hasSignificantDifference).length} show typography differences` :
+        'No clear text regions detected for typography analysis'
+    };
+  }
+
+  detectTextRegions(bufferA, bufferB, width, height) {
+    // Simplified text detection - look for high contrast areas that might be text
+    const regions = [];
+    const blockSize = 50; // 50x50 pixel blocks
+    
+    for (let y = 0; y < height - blockSize; y += blockSize) {
+      for (let x = 0; x < width - blockSize; x += blockSize) {
+        const contrastA = this.calculateContrast(bufferA, x, y, blockSize, width);
+        const contrastB = this.calculateContrast(bufferB, x, y, blockSize, width);
+        
+        if (contrastA > 0.3 || contrastB > 0.3) { // Likely text region
+          const contrastDiff = Math.abs(contrastA - contrastB);
+          regions.push({
+            x, y, 
+            contrastA, 
+            contrastB,
+            hasSignificantDifference: contrastDiff > 0.1
+          });
+        }
+      }
+    }
+    
+    return regions;
+  }
+
+  calculateContrast(buffer, startX, startY, blockSize, imageWidth) {
+    let minBrightness = 255;
+    let maxBrightness = 0;
+    
+    for (let y = startY; y < startY + blockSize; y++) {
+      for (let x = startX; x < startX + blockSize; x++) {
+        const pixelIndex = (y * imageWidth + x) * 3;
+        if (pixelIndex + 2 < buffer.length) {
+          const brightness = (buffer[pixelIndex] + buffer[pixelIndex + 1] + buffer[pixelIndex + 2]) / 3;
+          minBrightness = Math.min(minBrightness, brightness);
+          maxBrightness = Math.max(maxBrightness, brightness);
+        }
+      }
+    }
+    
+    return (maxBrightness - minBrightness) / 255;
+  }
+
+  formatAnalysisResults(analysis) {
+    let result = `📊 VISUAL COMPARISON RESULTS\n\n`;
+    
+    // Dimensions
+    result += `📐 Dimensions:\n`;
+    result += `- Source: ${analysis.dimensions.source.width}x${analysis.dimensions.source.height}\n`;
+    result += `- Target: ${analysis.dimensions.target.width}x${analysis.dimensions.target.height}\n`;
+    result += `- Match: ${analysis.dimensions.match ? '✅' : '❌'}\n\n`;
+    
+    // Overall similarity
+    result += `🎯 Overall Similarity: ${(analysis.similarity * 100).toFixed(1)}% ${analysis.similar ? '✅' : '❌'}\n\n`;
+    
+    // Layout analysis
+    if (analysis.layout.gridAnalysis) {
+      result += `📋 Layout Analysis:\n`;
+      result += `- ${analysis.layout.gridAnalysis}\n`;
+      if (analysis.layout.alignment.length > 0) {
+        result += `- Alignment issues: ${analysis.layout.alignment.join(', ')}\n`;
+      }
+      result += `\n`;
+    }
+    
+    // Color analysis
+    if (analysis.colors.summary) {
+      result += `🎨 Color Analysis:\n`;
+      result += `- ${analysis.colors.summary}\n`;
+      if (analysis.colors.examples.length > 0) {
+        result += `- Example differences:\n`;
+        analysis.colors.examples.slice(0, 3).forEach(diff => {
+          result += `  • ${diff.source} → ${diff.target} (diff: ${diff.difference})\n`;
+        });
+      }
+      result += `\n`;
+    }
+    
+    // Typography analysis
+    if (analysis.typography.summary) {
+      result += `📝 Typography Analysis:\n`;
+      result += `- ${analysis.typography.summary}\n\n`;
+    }
+    
+    return result;
+  }
+
   async run() {
     const transport = new StdioServerTransport();
     await this.server.connect(transport);
     console.error('Web Scraper MCP server running on stdio');
   }
 }
+
+export { WebScraperServer };
 
 const server = new WebScraperServer();
 server.run().catch(console.error);

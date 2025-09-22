@@ -23,6 +23,22 @@ This enhanced server maintains **100% compatibility** with:
 - 🆕 **Mobile viewport emulation**
 - 🆕 **Advanced React component inspection**
 
+## 📋 Tools Overview
+
+| Tool | Purpose | Best For |
+|------|---------|----------|
+| [`take_screenshot`](#1-take_screenshot---context-free-screenshot-capture) | Context-free screenshot capture | Visual analysis, UI documentation |
+| [`compare_screenshots`](#2-compare_screenshots---visual-ui-comparison) | Visual UI comparison with semantic analysis | UI replication, visual regression testing |
+| [`scrape_page`](#3-scrape_page---universal-web-scraping) | Universal web scraping | Content extraction, data collection |
+| [`test_react_app`](#4-test_react_app---universal-react-testing) | React app testing with mobile gestures | UI testing, interaction automation |
+| [`get_page_info`](#5-get_page_info---enhanced-page-analysis) | Page analysis with React insights | Performance monitoring, framework detection |
+| [`extract_content`](#6-extract_content---clean-content-extraction) | Clean content extraction | Documentation, article processing |
+| [`wait_for_element`](#7-wait_for_element---smart-element-waiting) | Smart element waiting | Dynamic content, loading states |
+| [`inspect_react_app`](#8-inspect_react_app---react-component-analysis) | React component analysis | Component debugging, state inspection |
+| [`wait_for_react_state`](#9-wait_for_react_state---react-state-management) | React state management | Hydration, navigation, data loading |
+| [`execute_in_react_context`](#10-execute_in_react_context---javascript-execution) | JavaScript execution in React context | Advanced debugging, custom scripts |
+| [`check_expo_dev_server`](#11-check_expo_dev_server---expo-development-tools) | Expo development server status | Development workflow, debugging |
+
 ## Features
 
 ### 🌐 Universal Web Scraping
@@ -46,9 +62,49 @@ This enhanced server maintains **100% compatibility** with:
 - **Performance monitoring** - Load times and metrics
 - **Debug capabilities** - Enhanced error reporting
 
+### 🎨 Visual Comparison Tools
+- **Context-free screenshots** - Capture images without HTML/CSS extraction
+- **Semantic visual analysis** - Layout, color, and typography comparison
+- **SPA-aware waiting** - Auto-detects React/Vue/Angular and waits for hydration
+- **UI replication feedback** - "centered vs left-aligned" instead of pixel coordinates
+
 ## Available Tools
 
-### 1. `scrape_page` - Universal Web Scraping
+### 1. `take_screenshot` - Context-Free Screenshot Capture
+Captures screenshots without extracting HTML/CSS content - perfect for visual analysis.
+
+```javascript
+{
+  url: "https://example.com",
+  browser: "chromium",
+  device: "iPhone 12", // Optional device emulation
+  fullPage: true,
+  waitForSPA: true // Auto-detects and waits for React/Vue/Angular apps
+}
+```
+
+### 2. `compare_screenshots` - Visual UI Comparison
+Compares two pages visually with semantic analysis - ideal for UI replication and testing.
+
+```javascript
+{
+  urlA: "https://source-design.com", // Source/reference
+  urlB: "https://your-implementation.com", // Target/implementation
+  browser: "chromium",
+  threshold: 0.1, // Similarity threshold (0-1)
+  analyzeLayout: true, // Detect alignment differences
+  analyzeColors: true, // Exact color comparison
+  analyzeTypography: true, // Font size/weight analysis
+  waitForSPA: true // Smart SPA detection
+}
+```
+
+**Returns semantic feedback like:**
+- "Content appears centered in source but left-aligned in target"
+- "Major color palette differences detected"
+- "Typography differences in 3 text regions"
+
+### 3. `scrape_page` - Universal Web Scraping
 Works with **any website** - regular HTML, React apps, or React Native web.
 
 **Regular website example:**
@@ -70,7 +126,7 @@ Works with **any website** - regular HTML, React apps, or React Native web.
 }
 ```
 
-### 2. `test_react_app` - Universal React Testing
+### 4. `test_react_app` - Universal React Testing
 Works with **any React application** - standard React or React Native web.
 
 **Standard React app example:**
@@ -98,7 +154,7 @@ Works with **any React application** - standard React or React Native web.
 }
 ```
 
-### 3. `get_page_info` - Enhanced Page Analysis
+### 5. `get_page_info` - Enhanced Page Analysis
 Provides comprehensive information for any web page with React-specific insights.
 
 ```javascript
@@ -108,7 +164,7 @@ Provides comprehensive information for any web page with React-specific insights
 }
 ```
 
-### 4. `extract_content` - Clean Content Extraction
+### 6. `extract_content` - Clean Content Extraction
 Extract clean, readable content from web pages without HTML/CSS clutter. Perfect for documentation, articles, and structured content consumption.
 
 ```javascript
@@ -142,7 +198,7 @@ See the rate limiting guide [3] for details.
 - **Content Filtering** - Removes navigation, ads, sidebars automatically
 - **Multiple Formats** - Markdown or plain text output
 
-### 5. `wait_for_element` - Smart Element Waiting
+### 7. `wait_for_element` - Smart Element Waiting
 Intelligent element waiting with automatic selector strategy fallbacks.
 
 ```javascript
@@ -155,16 +211,16 @@ Intelligent element waiting with automatic selector strategy fallbacks.
 
 ## React Native Web Specific Tools
 
-### 6. `inspect_react_app` - React Component Analysis
+### 8. `inspect_react_app` - React Component Analysis
 Deep inspection of React applications (works best with React Native web).
 
-### 7. `wait_for_react_state` - React State Management
+### 9. `wait_for_react_state` - React State Management
 Wait for React-specific conditions like hydration, navigation, data loading.
 
-### 8. `execute_in_react_context` - JavaScript Execution
+### 10. `execute_in_react_context` - JavaScript Execution
 Execute JavaScript in React context for advanced inspection.
 
-### 9. `check_expo_dev_server` - Expo Development Tools
+### 11. `check_expo_dev_server` - Expo Development Tools
 Check Expo/Metro bundler status for development workflows.
 
 ## Selector Strategy Priority
@@ -224,6 +280,19 @@ This ensures **regular CSS selectors work normally** while providing React Nativ
   includeLinks: true,
   format: "markdown"
 }
+```
+
+### Visual UI Comparison
+```javascript
+// Compare source design with implementation
+{
+  urlA: "https://figma-design-export.com",
+  urlB: "http://localhost:3000",
+  analyzeLayout: true,
+  analyzeColors: true,
+  analyzeTypography: true
+}
+// Returns: "Content appears centered in source but left-aligned in target"
 ```
 
 ## Installation
