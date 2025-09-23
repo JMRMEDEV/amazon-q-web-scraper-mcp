@@ -1916,12 +1916,60 @@ ${takeScreenshots ? `
         type: 'png'
       });
 
+      // Save screenshot to file for reference
+      const screenshotPath = `/tmp/screenshot-${Date.now()}.png`;
+      fs.writeFileSync(screenshotPath, screenshot);
+
+      // Get basic page analysis
+      const pageAnalysis = await page.evaluate(() => {
+        const body = document.body;
+        const visibleElements = Array.from(document.querySelectorAll('*')).filter(el => {
+          const style = window.getComputedStyle(el);
+          return style.display !== 'none' && style.visibility !== 'hidden' && style.opacity !== '0';
+        });
+
+        return {
+          title: document.title,
+          bodyText: body.textContent?.trim().substring(0, 500) + '...',
+          visibleElementCount: visibleElements.length,
+          hasContent: body.textContent?.trim().length > 100,
+          mainElements: {
+            headings: document.querySelectorAll('h1, h2, h3, h4, h5, h6').length,
+            paragraphs: document.querySelectorAll('p').length,
+            buttons: document.querySelectorAll('button').length,
+            inputs: document.querySelectorAll('input').length,
+            tables: document.querySelectorAll('table').length,
+            lists: document.querySelectorAll('ul, ol').length
+          }
+        };
+      });
+
       return {
-        content: [{
-          type: 'text',
-          text: `Screenshot captured from ${url}`
-        }],
-        screenshot: screenshot.toString('base64')
+        content: [
+          {
+            type: 'text',
+            text: `Screenshot captured from ${url}
+
+📸 Screenshot saved to: ${screenshotPath}
+
+📄 Page Analysis:
+- Title: ${pageAnalysis.title}
+- Has Content: ${pageAnalysis.hasContent ? '✅' : '❌'}
+- Visible Elements: ${pageAnalysis.visibleElementCount}
+
+📊 Content Elements:
+- Headings: ${pageAnalysis.mainElements.headings}
+- Paragraphs: ${pageAnalysis.mainElements.paragraphs}
+- Buttons: ${pageAnalysis.mainElements.buttons}
+- Inputs: ${pageAnalysis.mainElements.inputs}
+- Tables: ${pageAnalysis.mainElements.tables}
+- Lists: ${pageAnalysis.mainElements.lists}
+
+📝 Page Content Preview:
+${pageAnalysis.bodyText}`
+          }
+        ],
+        screenshotPath: screenshotPath
       };
     } finally {
       await context.close();
@@ -1977,6 +2025,49 @@ ${takeScreenshots ? `
         pageB.screenshot({ fullPage: true, type: 'png' })
       ]);
 
+      // Save screenshots for reference
+      const timestampA = Date.now();
+      const timestampB = timestampA + 1;
+      const pathA = `/tmp/compare-source-${timestampA}.png`;
+      const pathB = `/tmp/compare-target-${timestampB}.png`;
+      
+      fs.writeFileSync(pathA, screenshotA);
+      fs.writeFileSync(pathB, screenshotB);
+
+      // Get page content analysis for both pages
+      const [analysisA, analysisB] = await Promise.all([
+        pageA.evaluate(() => ({
+          title: document.title,
+          bodyText: document.body.textContent?.trim().substring(0, 300),
+          visibleElements: Array.from(document.querySelectorAll('*')).filter(el => {
+            const style = window.getComputedStyle(el);
+            return style.display !== 'none' && style.visibility !== 'hidden';
+          }).length,
+          mainElements: {
+            headings: document.querySelectorAll('h1, h2, h3, h4, h5, h6').length,
+            paragraphs: document.querySelectorAll('p').length,
+            buttons: document.querySelectorAll('button').length,
+            tables: document.querySelectorAll('table').length,
+            tableRows: document.querySelectorAll('tr').length
+          }
+        })),
+        pageB.evaluate(() => ({
+          title: document.title,
+          bodyText: document.body.textContent?.trim().substring(0, 300),
+          visibleElements: Array.from(document.querySelectorAll('*')).filter(el => {
+            const style = window.getComputedStyle(el);
+            return style.display !== 'none' && style.visibility !== 'hidden';
+          }).length,
+          mainElements: {
+            headings: document.querySelectorAll('h1, h2, h3, h4, h5, h6').length,
+            paragraphs: document.querySelectorAll('p').length,
+            buttons: document.querySelectorAll('button').length,
+            tables: document.querySelectorAll('table').length,
+            tableRows: document.querySelectorAll('tr').length
+          }
+        }))
+      ]);
+
       // Analyze images
       const analysis = await this.analyzeVisualDifferences(
         screenshotA, 
@@ -1984,12 +2075,62 @@ ${takeScreenshots ? `
         { analyzeLayout, analyzeColors, analyzeTypography, threshold }
       );
 
+      // Content comparison
+      const contentComparison = {
+        titles: {
+          source: analysisA.title,
+          target: analysisB.title,
+          match: analysisA.title === analysisB.title
+        },
+        elementCounts: {
+          source: analysisA.visibleElements,
+          target: analysisB.visibleElements,
+          difference: Math.abs(analysisA.visibleElements - analysisB.visibleElements)
+        },
+        structuralElements: {
+          headings: { source: analysisA.mainElements.headings, target: analysisB.mainElements.headings },
+          paragraphs: { source: analysisA.mainElements.paragraphs, target: analysisB.mainElements.paragraphs },
+          buttons: { source: analysisA.mainElements.buttons, target: analysisB.mainElements.buttons },
+          tables: { source: analysisA.mainElements.tables, target: analysisB.mainElements.tables },
+          tableRows: { source: analysisA.mainElements.tableRows, target: analysisB.mainElements.tableRows }
+        }
+      };
+
       return {
-        content: [{
-          type: 'text',
-          text: `Visual comparison between ${urlA} and ${urlB}:\n\n${this.formatAnalysisResults(analysis)}`
-        }],
-        analysis
+        content: [
+          {
+            type: 'text',
+            text: `Visual comparison between ${urlA} and ${urlB}:
+
+📸 Screenshots saved:
+- Source: ${pathA}
+- Target: ${pathB}
+
+📊 VISUAL SIMILARITY: ${(analysis.similarity * 100).toFixed(1)}% ${analysis.similar ? '✅ PASS' : '❌ FAIL'}
+
+📄 Content Analysis:
+- Source Title: "${contentComparison.titles.source}"
+- Target Title: "${contentComparison.titles.target}"
+- Titles Match: ${contentComparison.titles.match ? '✅' : '❌'}
+
+📈 Element Counts:
+- Source Elements: ${contentComparison.elementCounts.source}
+- Target Elements: ${contentComparison.elementCounts.target}
+- Difference: ${contentComparison.elementCounts.difference} elements
+
+🏗️ Structural Comparison:
+- Headings: ${contentComparison.structuralElements.headings.source} → ${contentComparison.structuralElements.headings.target}
+- Paragraphs: ${contentComparison.structuralElements.paragraphs.source} → ${contentComparison.structuralElements.paragraphs.target}
+- Buttons: ${contentComparison.structuralElements.buttons.source} → ${contentComparison.structuralElements.buttons.target}
+- Tables: ${contentComparison.structuralElements.tables.source} → ${contentComparison.structuralElements.tables.target}
+- Table Rows: ${contentComparison.structuralElements.tableRows.source} → ${contentComparison.structuralElements.tableRows.target}
+
+${this.formatAnalysisResults(analysis)}`
+          }
+        ],
+        analysis,
+        contentComparison,
+        screenshots: { pathA, pathB }
       };
     } finally {
       await context.close();
